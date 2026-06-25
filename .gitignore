@@ -1,2 +1,6 @@
 build/
+__pycache__/
 camera_calibration_result.xml
+camera_extrinsic_result.xml
+undistortion_results/
+process.ipynb

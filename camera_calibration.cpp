@@ -1,9 +1,7 @@
-
-
 #include <opencv2/opencv.hpp>
-#include <opencv2/calib3d.hpp>
-#include <opencv2/highgui.hpp>
-#include <opencv2/imgproc.hpp>
+#include <opencv2/calib3d.hpp> // 用于相机标定函数
+#include <opencv2/highgui.hpp> // 用于显示图像
+#include <opencv2/imgproc.hpp> // 用于图像处理（如cvtColor）
 #include <iostream>
 #include <vector>
 #include <string>
@@ -52,7 +50,7 @@ int findChessboardCorners(
                 gray,
                 corners,
                 Size(5, 5),
-                Size(-1, -1),
+                Size(-1, -1), // 没有死区
                 TermCriteria(TermCriteria::EPS + TermCriteria::COUNT, 30, 0.001)
             );
             
@@ -158,11 +156,11 @@ void saveCalibrationResults(
 {
     FileStorage fs(filename, FileStorage::WRITE);
     
-    time_t t;
-    time(&t);
-    struct tm* timeinfo = localtime(&t);
+    time_t t; // 获取当前时间
+    time(&t); // 获取当前时间戳
+    struct tm* timeinfo = localtime(&t); // 转换为本地时间结构
     char buffer[80];
-    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo); // 格式化时间字符串
     
     fs << "calibration_time" << buffer;
     fs << "image_width" << imageSize.width;
@@ -225,12 +223,12 @@ void testUndistortion(
         
         // 调整显示大小
         Mat display;
-        double scale = 800.0 / comparison.cols;
-        resize(comparison, display, Size(), scale, scale);
+        double scale = 800.0 / comparison.cols; // 调整宽度为800像素
+        resize(comparison, display, Size(), scale, scale); // 等比例缩放
         
         // 添加文字说明
         putText(display, "Original", Point(10, 30),
-                FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 255, 0), 2);
+                FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 255, 0), 2); // 绿色字体
         putText(display, "Undistorted", Point(display.cols / 2 + 10, 30),
                 FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 255, 0), 2);
         
@@ -241,6 +239,116 @@ void testUndistortion(
     }
     
     destroyWindow("去畸变效果对比");
+}
+
+/**
+ * @brief 基于地面棋盘格，使用PnP算法计算相机的外参（旋转向量和平移向量）
+ *
+ * 地面棋盘格定义世界坐标系：棋盘平面为Z=0平面（地面），
+ * X轴沿棋盘宽度方向，Y轴沿棋盘高度方向，Z轴垂直地面向上。
+ *
+ * @param objectPoints 棋盘角点的世界坐标（3D点集）
+ * @param imagePoints  棋盘角点的图像坐标（2D点集）
+ * @param cameraMatrix 相机内参矩阵（3x3）
+ * @param distCoeffs   畸变系数
+ * @param rvec 输出：旋转向量（Rodrigues形式，3x1）
+ * @param tvec 输出：平移向量（3x1，单位与squareSize一致）
+ * @return 是否成功计算
+ */
+bool computeExtrinsicPnP(
+    const vector<Point3f>& objectPoints,
+    const vector<Point2f>& imagePoints,
+    const Mat& cameraMatrix,
+    const Mat& distCoeffs,
+    Mat& rvec,
+    Mat& tvec)
+{
+    // 使用PnP算法求解相机位姿
+    // SOLVEPNP_ITERATIVE: 基于Levenberg-Marquardt优化的迭代方法，精度较高
+    cv::solvePnP(
+        objectPoints,
+        imagePoints,
+        cameraMatrix,
+        distCoeffs,
+        rvec,
+        tvec,
+        false,                 // 不使用外部初始猜测值
+        SOLVEPNP_ITERATIVE
+    );
+
+    return true;
+}
+
+/**
+ * @brief 打印相机外参结果
+ *
+ * 显示旋转向量、旋转矩阵、平移向量，以及相机在世界坐标系中的位置。
+ *
+ * @param rvec 旋转向量（Rodrigues形式）
+ * @param tvec 平移向量
+ */
+void printExtrinsicResults(const Mat& rvec, const Mat& tvec)
+{
+    // 将旋转向量转换为旋转矩阵（便于理解和使用）
+    Mat R;
+    Rodrigues(rvec, R);
+
+    cout << "\n========== 相机外参（基于地面棋盘格PnP）==========" << endl;
+
+    // 输出旋转向量（Rodrigues形式：旋转轴×旋转角）
+    cout << "\n旋转向量 (Rodrigues形式):" << endl;
+    cout << "  rx = " << rvec.at<double>(0, 0) << endl;
+    cout << "  ry = " << rvec.at<double>(1, 0) << endl;
+    cout << "  rz = " << rvec.at<double>(2, 0) << endl;
+
+    // 输出旋转矩阵（世界坐标系 → 相机坐标系）
+    cout << "\n旋转矩阵 R（世界坐标系 → 相机坐标系）:" << endl;
+    cout << R << endl;
+
+    // 输出平移向量（世界坐标系原点在相机坐标系中的坐标）
+    cout << "\n平移向量 t（世界坐标系原点在相机坐标系中的位置，单位：mm）:" << endl;
+    cout << "  tx = " << tvec.at<double>(0, 0) << " mm" << endl;
+    cout << "  ty = " << tvec.at<double>(1, 0) << " mm" << endl;
+    cout << "  tz = " << tvec.at<double>(2, 0) << " mm" << endl;
+
+    // 计算相机光心在世界坐标系中的位置: C = -R^T * t
+    // R是正交矩阵，其逆矩阵等于其转置
+    Mat R_transpose = R.t();
+    Mat cameraPos = -R_transpose * tvec;
+
+    cout << "\n相机在世界坐标系中的位置（光心）:" << endl;
+    cout << "  Xc = " << cameraPos.at<double>(0, 0) << " mm" << endl;
+    cout << "  Yc = " << cameraPos.at<double>(1, 0) << " mm" << endl;
+    cout << "  Zc = " << cameraPos.at<double>(2, 0) << " mm （相机距地面高度）" << endl;
+
+    // 从旋转矩阵分解欧拉角（ZYX顺序：偏航Yaw → 俯仰Pitch → 翻滚Roll）
+    double sy = sqrt(R.at<double>(0, 0) * R.at<double>(0, 0)
+                   + R.at<double>(1, 0) * R.at<double>(1, 0));
+    bool singular = sy < 1e-6;
+
+    double pitch, yaw, roll;
+    if (!singular) {
+        pitch = atan2(-R.at<double>(2, 0), sy);
+        yaw   = atan2( R.at<double>(1, 0), R.at<double>(0, 0));
+        roll  = atan2( R.at<double>(2, 1), R.at<double>(2, 2));
+    } else {
+        // 万向节死锁时的退化处理
+        pitch = atan2(-R.at<double>(2, 0), sy);
+        yaw   = atan2(-R.at<double>(1, 2), R.at<double>(1, 1));
+        roll  = 0;
+    }
+
+    // 弧度转角度
+    pitch = pitch * 180.0 / CV_PI;
+    yaw   = yaw   * 180.0 / CV_PI;
+    roll  = roll  * 180.0 / CV_PI;
+
+    cout << "\n相机欧拉角（ZYX顺序）:" << endl;
+    cout << "  偏航角 Yaw   = " << yaw   << "°" << endl;
+    cout << "  俯仰角 Pitch = " << pitch << "°" << endl;
+    cout << "  翻滚角 Roll  = " << roll  << "°" << endl;
+
+    cout << "\n===================================================" << endl;
 }
 
 /**
@@ -256,7 +364,7 @@ int main(int argc, char** argv)
     Size boardSize(6, 4);
     
     // 棋盘方格的实际大小（单位：毫米）
-    float squareSize = 25.0f; // 例如：25mm
+    float squareSize = 30.0f; 
     
     // 标定图像路径（可以根据需要修改）
     vector<string> imagePaths;
@@ -268,15 +376,15 @@ int main(int argc, char** argv)
         }
     }
     // 方式2：手动指定图像路径（示例）
-    else {
-        cout << "用法示例：" << endl;
-        cout << "  " << argv[0] << " image1.jpg image2.jpg image3.jpg ..." << endl;
-        cout << "\n未提供图像，将尝试从默认路径读取..." << endl;
-        
-        // 从calibration_images目录读取所有jpg图像
-        for (int i = 1; i <= 20; i++) {
-            string path = "calibration_images/image_" + to_string(i) + ".jpg";
-            imagePaths.push_back(path);
+    else {        
+        // 从calibration_images目录读取所有的图像 chessboard01.jpg 一直到最后一个文件
+        while(true) {
+            string path = "calibration_images/chessboard" + string(imagePaths.size() < 9 ? "0" : "") + to_string(imagePaths.size() + 1) + ".jpg";
+            if (ifstream(path).good()) {
+                imagePaths.push_back(path);
+            } else {
+                break; // 没有更多图像了
+            }
         }
     }
     
@@ -363,9 +471,125 @@ int main(int argc, char** argv)
         distCoeffs,
         rms
     );
-    
+
+    // ==================== 计算相机外参（PnP） ====================
+
+    cout << "\n是否要基于地面棋盘格计算相机外参？(y/n): ";
+    char extChoice;
+    cin >> extChoice;
+
+    if (extChoice == 'y' || extChoice == 'Y') {
+        // 从专门的外参图像文件夹加载图像
+        // 该文件夹独立于标定图像，专门存放用于外参计算的棋盘格照片
+        vector<string> extImagePaths;
+        int extIdx = 1;
+        while (true) {
+            string path = "extrinsic_images/chessboard"
+                + string(extIdx < 10 ? "0" : "")
+                + to_string(extIdx) + ".jpg";
+            if (ifstream(path).good()) {
+                extImagePaths.push_back(path);
+                extIdx++;
+            } else {
+                break;
+            }
+        }
+
+        if (extImagePaths.empty()) {
+            cerr << "\n错误：extrinsic_images/ 文件夹中未找到外参图像！" << endl;
+            cerr << "请将用于外参计算的棋盘格图像放入 extrinsic_images/ 文件夹，" << endl;
+            cerr << "并按照 chessboard01.jpg, chessboard02.jpg ... 的命名规则命名。" << endl;
+        } else {
+            cout << "\n从 extrinsic_images/ 加载了 "
+                 << extImagePaths.size() << " 张外参图像" << endl;
+
+            // 询问是否将外参保存到XML文件（提前询问，避免逐张询问）
+            cout << "是否将外参保存到文件？(y/n): ";
+            char saveExtChoice;
+            cin >> saveExtChoice;
+            bool saveExt = (saveExtChoice == 'y' || saveExtChoice == 'Y');
+
+            FileStorage fs_ext;
+            if (saveExt) {
+                fs_ext.open("camera_extrinsic_result.xml", FileStorage::WRITE);
+            }
+
+            // 遍历每张外参图像，依次检测角点并计算外参
+            for (size_t i = 0; i < extImagePaths.size(); i++) {
+                // 加载图像
+                Mat extImg = imread(extImagePaths[i]);
+                if (extImg.empty()) {
+                    cout << "  警告：无法加载 " << extImagePaths[i] << "，跳过" << endl;
+                    continue;
+                }
+
+                // 转换为灰度图并检测棋盘角点
+                Mat gray;
+                cvtColor(extImg, gray, COLOR_BGR2GRAY);
+
+                vector<Point2f> extCorners;
+                bool found = cv::findChessboardCorners(
+                    gray,
+                    boardSize,
+                    extCorners,
+                    CALIB_CB_ADAPTIVE_THRESH | CALIB_CB_NORMALIZE_IMAGE | CALIB_CB_FAST_CHECK
+                );
+
+                if (!found) {
+                    cout << "\n图像 " << extImagePaths[i]
+                         << ": 未能检测到角点，跳过" << endl;
+                    continue;
+                }
+
+                // 亚像素级角点优化
+                cornerSubPix(
+                    gray,
+                    extCorners,
+                    Size(11, 11),
+                    Size(-1, -1),
+                    TermCriteria(TermCriteria::EPS + TermCriteria::COUNT, 30, 0.001)
+                );
+
+                // 使用PnP计算当前图像对应的相机外参
+                Mat rvec, tvec;
+                computeExtrinsicPnP(
+                    objectPointsPattern,  // 世界坐标（地面棋盘格角点）
+                    extCorners,           // 当前图像检测到的角点
+                    cameraMatrix,
+                    distCoeffs,
+                    rvec,
+                    tvec
+                );
+
+                cout << "\n--- 外参图像: " << extImagePaths[i] << " ---";
+                printExtrinsicResults(rvec, tvec);
+
+                // 保存外参到XML文件（以图像编号作为节点名）
+                if (saveExt) {
+                    string nodeName = "extrinsic_" + to_string(i + 1);
+                    fs_ext << nodeName << "{";
+                    fs_ext << "image_path" << extImagePaths[i];
+                    fs_ext << "rvec" << rvec;
+                    fs_ext << "tvec" << tvec;
+                    Mat R_ext;
+                    Rodrigues(rvec, R_ext);
+                    fs_ext << "rotation_matrix" << R_ext;
+                    // 同时保存相机在世界坐标系中的位置 C = -R^T * t
+                    Mat camPos = -R_ext.t() * tvec;
+                    fs_ext << "camera_position_in_world" << camPos;
+                    fs_ext << "}";
+                }
+            }
+
+            if (saveExt) {
+                fs_ext.release();
+                cout << "\n外参已保存到: camera_extrinsic_result.xml" << endl;
+            }
+        }
+    }
+
     // ==================== 测试去畸变效果 ====================
-    
+
     cout << "\n是否要查看去畸变效果？(y/n): ";
     char choice;
     cin >> choice;
